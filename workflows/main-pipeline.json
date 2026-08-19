@@ -1,0 +1,401 @@
+{
+  "name": "IG Content Pipeline - Main",
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [ -1600, 0 ],
+      "parameters": {
+        "rule": { "interval": [ { "field": "days", "daysInterval": 1, "triggerAtHour": 9 } ] }
+      }
+    },
+    {
+      "id": "fetch_trends",
+      "name": "Fetch Trends",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -1360, 0 ],
+      "notes": "Replace with your trend source: SerpApi Google Trends endpoint, an Apify actor run, or a Reddit/X search API call. Must return text n8n can pass to the LLM next.",
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "engine", "value": "google_trends" },
+            { "name": "q", "value": "YOUR_NICHE_KEYWORD" },
+            { "name": "api_key", "value": "YOUR_SERPAPI_KEY" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "gen_idea",
+      "name": "Generate Post Idea (Groq, free)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -1120, 0 ],
+      "notes": "Groq's free tier (OpenAI-compatible API). Get a key at console.groq.com - no card required. Ask it to return ONLY JSON so downstream nodes can parse it reliably.",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$credentials.groqApi.apiKey}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.9,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"You generate Instagram post ideas for the niche: YOUR_NICHE. Trend data: \" + JSON.stringify($json) + \". Return ONLY valid JSON matching this shape: {\\\"concept\\\": string, \\\"caption\\\": string, \\\"hashtags\\\": string[], \\\"is_carousel\\\": boolean, \\\"num_images\\\": number}\"\n  }]\n}"
+      }
+    },
+    {
+      "id": "parse_idea",
+      "name": "Parse Idea JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ -880, 0 ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices[0].message.content;\nconst idea = JSON.parse(raw);\nreturn [{ json: idea }];"
+      }
+    },
+    {
+      "id": "send_wa_1",
+      "name": "WhatsApp: Send Idea for Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -640, 0 ],
+      "notes": "Uses the WhatsApp Business Cloud API interactive-buttons message type. Buttons carry a short id (approve_idea / reject_idea) you'll read in the webhook receiver workflow.",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{$credentials.whatsappApi.phoneNumberId}}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$credentials.whatsappApi.accessToken}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"YOUR_WHATSAPP_NUMBER\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"body\": { \"text\": \"New post idea:\\n\\n\" + $json.concept + \"\\n\\nCaption: \" + $json.caption },\n    \"action\": { \"buttons\": [\n      { \"type\": \"reply\", \"reply\": { \"id\": \"approve_idea\", \"title\": \"Approve\" } },\n      { \"type\": \"reply\", \"reply\": { \"id\": \"reject_idea\", \"title\": \"Reject\" } }\n    ]}\n  }\n}"
+      }
+    },
+    {
+      "id": "wait_1",
+      "name": "Wait for Idea Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [ -400, 0 ],
+      "notes": "resume=webhook. n8n generates a unique resume URL for THIS run at {{$execution.resumeUrl}}. The previous node's expression should also POST that resumeUrl to a small 'pending approvals' store (e.g. Airtable/Postgres) keyed by chat id, so the webhook-receiver workflow knows where to send the reply.",
+      "parameters": {
+        "resume": "webhook",
+        "webhookSuffix": "={{$execution.id}}-idea",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours"
+      }
+    },
+    {
+      "id": "check_1",
+      "name": "IF Idea Approved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ -160, 0 ],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            { "leftValue": "={{$json.button_id}}", "rightValue": "approve_idea", "operator": { "type": "string", "operation": "equals" } }
+          ]
+        }
+      }
+    },
+    {
+      "id": "gen_prompts",
+      "name": "Generate Image Prompts (Groq, free)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 100, -100 ],
+      "notes": "If is_carousel, ask for num_images prompts that share a consistent style/character/palette so the carousel looks cohesive.",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$credentials.groqApi.apiKey}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.9,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"Turn this approved post concept into \" + $json.num_images + \" detailed image-generation prompt(s), consistent style across all of them: \" + $json.concept + \". Return ONLY JSON: {\\\"prompts\\\": string[]}\"\n  }]\n}"
+      }
+    },
+    {
+      "id": "parse_prompts",
+      "name": "Parse Prompts JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 340, -100 ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices[0].message.content;\nconst parsed = JSON.parse(raw);\nreturn [{ json: parsed }];"
+      }
+    },
+    {
+      "id": "send_wa_2",
+      "name": "WhatsApp: Send Prompts for Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 580, -100 ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{$credentials.whatsappApi.phoneNumberId}}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$credentials.whatsappApi.accessToken}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"YOUR_WHATSAPP_NUMBER\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"body\": { \"text\": \"Image prompts:\\n\\n\" + $json.prompts.join(\"\\n\\n\") },\n    \"action\": { \"buttons\": [\n      { \"type\": \"reply\", \"reply\": { \"id\": \"approve_prompts\", \"title\": \"Approve\" } },\n      { \"type\": \"reply\", \"reply\": { \"id\": \"reject_prompts\", \"title\": \"Reject\" } }\n    ]}\n  }\n}"
+      }
+    },
+    {
+      "id": "wait_2",
+      "name": "Wait for Prompt Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [ 820, -100 ],
+      "parameters": {
+        "resume": "webhook",
+        "webhookSuffix": "={{$execution.id}}-prompts",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours"
+      }
+    },
+    {
+      "id": "check_2",
+      "name": "IF Prompts Approved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 1060, -100 ],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            { "leftValue": "={{$json.button_id}}", "rightValue": "approve_prompts", "operator": { "type": "string", "operation": "equals" } }
+          ]
+        }
+      }
+    },
+    {
+      "id": "split_prompts",
+      "name": "Split Out Prompts",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [ 1080, -200 ],
+      "notes": "Turns the prompts array into one item per prompt, so the next node runs once per image (needed for carousels).",
+      "parameters": { "fieldToSplitOut": "prompts" }
+    },
+    {
+      "id": "gen_images",
+      "name": "Generate Images (Pollinations, free, no key)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 1320, -200 ],
+      "notes": "Pollinations.ai is a free, keyless image API - just GET a URL and it returns the image. No signup needed. Response is the raw image bytes, so set 'Response Format' to File in the node's Options if you want to save/forward it; the URL itself is also directly usable as WhatsApp/Instagram's image link. Swap for Hugging Face or Stability if you want higher quality and don't mind a free-tier key.",
+      "parameters": {
+        "method": "GET",
+        "url": "=https://image.pollinations.ai/prompt/{{encodeURIComponent($json.prompts)}}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "width", "value": "1024" },
+            { "name": "height", "value": "1024" },
+            { "name": "nologo", "value": "true" }
+          ]
+        },
+        "options": { "response": { "response": { "responseFormat": "file" } } }
+      }
+    },
+    {
+      "id": "send_wa_3",
+      "name": "WhatsApp: Send Final Images for Approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 1560, -200 ],
+      "notes": "Pollinations image URLs (https://image.pollinations.ai/prompt/...) are themselves valid public image links, so you can skip downloading bytes and just pass that URL straight to WhatsApp's image.link field. Send one message per image, then a final text message with Approve/Reject buttons.",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{$credentials.whatsappApi.phoneNumberId}}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$credentials.whatsappApi.accessToken}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"YOUR_WHATSAPP_NUMBER\",\n  \"type\": \"image\",\n  \"image\": { \"link\": $json.images[0].url }\n}"
+      }
+    },
+    {
+      "id": "wait_3",
+      "name": "Wait for Final Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [ 1800, -200 ],
+      "parameters": {
+        "resume": "webhook",
+        "webhookSuffix": "={{$execution.id}}-final",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours"
+      }
+    },
+    {
+      "id": "check_3",
+      "name": "IF Final Approved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 2040, -200 ],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            { "leftValue": "={{$json.button_id}}", "rightValue": "approve_final", "operator": { "type": "string", "operation": "equals" } }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ig_container",
+      "name": "IG: Create Media Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 2300, -300 ],
+      "notes": "For a single image, image_url + caption is enough. For a carousel, create one container per image first (is_carousel_item: true), then a parent CAROUSEL container referencing their ids, then publish the parent.",
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{$credentials.instagramApi.igUserId}}/media",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "image_url", "value": "={{$json.images[0].url}}" },
+            { "name": "caption", "value": "={{$json.caption}}" },
+            { "name": "access_token", "value": "={{$credentials.instagramApi.accessToken}}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ig_publish",
+      "name": "IG: Publish Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 2540, -300 ],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{$credentials.instagramApi.igUserId}}/media_publish",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "creation_id", "value": "={{$json.id}}" },
+            { "name": "access_token", "value": "={{$credentials.instagramApi.accessToken}}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "log_final",
+      "name": "Log Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [ 2780, -300 ],
+      "notes": "Point this at Airtable/Postgres/Google Sheets to keep a permanent record of every posted item and its approvals.",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "name": "status", "type": "string", "value": "published" },
+            { "name": "posted_at", "type": "string", "value": "={{$now}}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stop_idea",
+      "name": "Stop: Idea Rejected",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ -160, 200 ],
+      "parameters": {}
+    },
+    {
+      "id": "stop_prompts",
+      "name": "Stop: Prompts Rejected",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ 1060, 100 ],
+      "parameters": {}
+    },
+    {
+      "id": "stop_final",
+      "name": "Stop: Final Rejected",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ 2040, 0 ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Daily Trigger": { "main": [ [ { "node": "Fetch Trends", "type": "main", "index": 0 } ] ] },
+    "Fetch Trends": { "main": [ [ { "node": "Generate Post Idea (Groq, free)", "type": "main", "index": 0 } ] ] },
+    "Generate Post Idea (Groq, free)": { "main": [ [ { "node": "Parse Idea JSON", "type": "main", "index": 0 } ] ] },
+    "Parse Idea JSON": { "main": [ [ { "node": "WhatsApp: Send Idea for Approval", "type": "main", "index": 0 } ] ] },
+    "WhatsApp: Send Idea for Approval": { "main": [ [ { "node": "Wait for Idea Approval", "type": "main", "index": 0 } ] ] },
+    "Wait for Idea Approval": { "main": [ [ { "node": "IF Idea Approved", "type": "main", "index": 0 } ] ] },
+    "IF Idea Approved": {
+      "main": [
+        [ { "node": "Generate Image Prompts (Groq, free)", "type": "main", "index": 0 } ],
+        [ { "node": "Stop: Idea Rejected", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Generate Image Prompts (Groq, free)": { "main": [ [ { "node": "Parse Prompts JSON", "type": "main", "index": 0 } ] ] },
+    "Parse Prompts JSON": { "main": [ [ { "node": "WhatsApp: Send Prompts for Approval", "type": "main", "index": 0 } ] ] },
+    "WhatsApp: Send Prompts for Approval": { "main": [ [ { "node": "Wait for Prompt Approval", "type": "main", "index": 0 } ] ] },
+    "Wait for Prompt Approval": { "main": [ [ { "node": "IF Prompts Approved", "type": "main", "index": 0 } ] ] },
+    "IF Prompts Approved": {
+      "main": [
+        [ { "node": "Split Out Prompts", "type": "main", "index": 0 } ],
+        [ { "node": "Stop: Prompts Rejected", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Split Out Prompts": { "main": [ [ { "node": "Generate Images (Pollinations, free, no key)", "type": "main", "index": 0 } ] ] },
+    "Generate Images (Pollinations, free, no key)": { "main": [ [ { "node": "WhatsApp: Send Final Images for Approval", "type": "main", "index": 0 } ] ] },
+    "WhatsApp: Send Final Images for Approval": { "main": [ [ { "node": "Wait for Final Approval", "type": "main", "index": 0 } ] ] },
+    "Wait for Final Approval": { "main": [ [ { "node": "IF Final Approved", "type": "main", "index": 0 } ] ] },
+    "IF Final Approved": {
+      "main": [
+        [ { "node": "IG: Create Media Container", "type": "main", "index": 0 } ],
+        [ { "node": "Stop: Final Rejected", "type": "main", "index": 0 } ]
+      ]
+    },
+    "IG: Create Media Container": { "main": [ [ { "node": "IG: Publish Container", "type": "main", "index": 0 } ] ] },
+    "IG: Publish Container": { "main": [ [ { "node": "Log Result", "type": "main", "index": 0 } ] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" }
+}
