@@ -1,0 +1,80 @@
+{
+  "name": "IG Content Pipeline - WhatsApp Receiver",
+  "nodes": [
+    {
+      "id": "wa_webhook",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [ -800, 0 ],
+      "notes": "Set this URL in your Meta App > WhatsApp > Configuration > Webhook. Meta sends a GET with hub.challenge to verify, and POSTs every incoming message/button reply here after that.",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wa-incoming",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "id": "extract_reply",
+      "name": "Extract Button Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ -560, 0 ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst entry = body.entry?.[0]?.changes?.[0]?.value;\nconst msg = entry?.messages?.[0];\nif (!msg) return [];\nconst button_id = msg.interactive?.button_reply?.id || null;\nconst from = msg.from;\nreturn [{ json: { button_id, from, raw_text: msg.text?.body || null } }];"
+      }
+    },
+    {
+      "id": "lookup_resume_url",
+      "name": "Look Up Pending Resume URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -320, 0 ],
+      "notes": "Reads the 'pending_approvals' table where the main pipeline stored {{$execution.resumeUrl}} just before each Wait node, keyed by your WhatsApp number. Swap this for whatever store you used (Airtable, Postgres, Google Sheets).",
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.airtable.com/v0/YOUR_BASE_ID/pending_approvals",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [ { "name": "Authorization", "value": "=Bearer {{$credentials.airtableApi.apiKey}}" } ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [ { "name": "filterByFormula", "value": "={\"from\" = '\" + $json.from + \"'}\"}" } ]
+        }
+      }
+    },
+    {
+      "id": "resume_execution",
+      "name": "Resume Paused Execution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -80, 0 ],
+      "notes": "POSTs the button_id to the stored resumeUrl, which wakes up the exact Wait node that's paused for this person.",
+      "parameters": {
+        "method": "POST",
+        "url": "={{$json.records[0].fields.resume_url}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"button_id\": $('Extract Button Reply').item.json.button_id }"
+      }
+    },
+    {
+      "id": "respond_ok",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [ 160, 0 ],
+      "notes": "Meta requires a fast 200 response or it will retry/flag the webhook as broken.",
+      "parameters": { "respondWith": "text", "responseBody": "EVENT_RECEIVED" }
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": { "main": [ [ { "node": "Extract Button Reply", "type": "main", "index": 0 } ] ] },
+    "Extract Button Reply": { "main": [ [ { "node": "Look Up Pending Resume URL", "type": "main", "index": 0 } ] ] },
+    "Look Up Pending Resume URL": { "main": [ [ { "node": "Resume Paused Execution", "type": "main", "index": 0 } ] ] },
+    "Resume Paused Execution": { "main": [ [ { "node": "Respond 200 OK", "type": "main", "index": 0 } ] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" }
+}
