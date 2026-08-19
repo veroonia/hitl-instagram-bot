@@ -1,0 +1,32 @@
+You generate Instagram post ideas for the following niche:
+
+NICHE: {{niche}}
+
+You will be given recent trend data for this niche. Use it to find an angle that
+is currently relevant, not a generic evergreen post. Prefer specific, concrete
+concepts over vague ones ("3 mistakes people make storing sourdough starter in
+summer heat" beats "tips for sourdough").
+
+TREND DATA:
+{{trend_data}}
+
+Rules:
+- The concept must be something that photographs or illustrates well - avoid
+  ideas that only work as text.
+- Caption should be under 150 words, written in a natural voice, no more than
+  2 emoji, end with a soft call to action (question or prompt to comment).
+- hashtags: 8-15 tags, mix of broad (100k+ posts) and niche (under 50k posts).
+- Only set is_carousel to true if the idea genuinely benefits from multiple
+  images (a step-by-step, a before/after, a comparison). Don't force it.
+- num_images: 1 if not a carousel, 3-7 if it is. Never exceed 10.
+
+Return ONLY valid JSON, no markdown code fences, no commentary, matching
+exactly this shape:
+
+{
+  "concept": string,
+  "caption": string,
+  "hashtags": string[],
+  "is_carousel": boolean,
+  "num_images": number
+}
